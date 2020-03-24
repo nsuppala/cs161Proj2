@@ -28,17 +28,31 @@ func TestInit(t *testing.T) {
 	// You can set this to false!
 	userlib.SetDebugStatus(true)
 
-	u, err := InitUser("alice", "fubar")
+	u1, err := InitUser("alice", "fubar")
 	if err != nil {
 		// t.Error says the test fails
 		t.Error("Failed to initialize user", err)
 		return
 	}
 	// t.Log() only produces output if you run with "go test -v"
-	t.Log("Got user", u)
+	//t.Log("Got user", u1)
 	// If you want to comment the line above,
-	// write _ = u here to make the compiler happy
+	// write _ = u1 here to make the compiler happy
+	_ = u1
 	// You probably want many more tests here.
+
+
+	u2, err1 := GetUser("alice", "fubar")
+	if err != nil {
+		t.Error("Failed to get user", err1)
+		return
+	}
+	//t.Log("Got user", u1)
+	//t.Log("Got user", u2)
+	if u2 != u1 {
+			t.Error("Got incorrect user")
+			return
+	}
 }
 
 func TestStorage(t *testing.T) {
@@ -94,7 +108,7 @@ func TestShare(t *testing.T) {
 
 	v := []byte("This is a test")
 	u.StoreFile("file1", v)
-	
+
 	var v2 []byte
 	var magic_string string
 

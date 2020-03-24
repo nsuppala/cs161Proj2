@@ -167,6 +167,7 @@ func InitUser(username string, password string) (userdataptr *User, err error) {
 
 	// generate encrypted userdata and store in DataStore
 	marshalData, _ := json.Marshal(userdata)
+	//userlib.DebugMsg(string(marshalData) + "\n")
 	iv := userlib.RandomBytes(16)
 	encData:= userlib.SymEnc(userdata.EncryptionKey, iv, marshalData)
 	macData, _ := userlib.HMACEval(userdata.MACKey, encData)
@@ -211,12 +212,15 @@ func GetUser(username string, password string) (userdataptr *User, err error) {
 	// unmarshal and verify data
 	var c [2][]byte
 	json.Unmarshal(data, &c)
-	if macdata, _ := userlib.HMACEval(mackey[:16], c[0]); !userlib.HMACEqual(macdata,c[1]) {
+	macdata, _ := userlib.HMACEval(mackey[:16], c[0])
+	if !userlib.HMACEqual(macdata,c[1]) {
 		return nil, errors.New(strings.ToTitle("Incorrect password or compromised data"))
 	}
 
 	// if data is correct then decrypt it and assign userdatat ptr to it
-	json.Unmarshal(userlib.SymDec(enckey[:16], c[1]), userdataptr)
+	decdata := userlib.SymDec(enckey[:16], c[1])
+	//userlib.DebugMsg(string(decdata) + "\n")
+	json.Unmarshal(decdata, &userdata)
 
 	return userdataptr, nil
 }
