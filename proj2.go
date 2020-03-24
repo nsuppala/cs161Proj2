@@ -80,6 +80,10 @@ func bytesToUUID(data []byte) (ret uuid.UUID) {
 	}
 	return
 }
+// struct to create pairs
+type Pair struct {
+    a, b byte[]
+}
 
 // The structure definition for a user record
 type User struct {
@@ -138,10 +142,36 @@ func InitUser(username string, password string) (userdataptr *User, err error) {
 	var userdata User
 	userdataptr = &userdata
 
-	//TODO: This is a toy implementation.
+  // Generate public key for username and add it to the keystore
+	// add privatekey to userdata struct
 	userdata.Username = username
-	//End of toy implementation
 	userdata.PublicKey, userdata.PrivateKey, errMessage = userlib.DSKeyGen()
+	_, ok := userlib.KeystoreGet(username)
+	if ok {
+			return nil, errors.New(strings.ToTitle("Entry already exists for %s", username)
+	}
+	userlib.KeystoreSet(username, userdata.PublicKey)
+
+  // initialize empty userfiles map
+	userdata.files = make(map[string]uuid.UUID)
+
+  // use password to generate symmetric key with public key as salt
+	kp := userlib.Argon2Key(password, userdata.PublicKey, 16)
+
+	// use kp to generate other keys
+	usernameHashKey := userlib.HashKDF(kp, []byte("username hash"))
+	userdata.MACKey = userlib.HashKDF(kp, []byte("MAC"))
+	userdata.EncryptionKey = userlib.HashKDF(kp, []byte("encryption"))
+
+  // generate UUID from username and HMAC_usernameHashKey
+	userdata.UUID = userlib.uuid.FromBytes(userlib.HMACEval(usernameHashKey, username))
+
+	// generate encrypted userdata and store in DataStore
+	marshalData, _ := json.Marshal(userdata)
+	encData := userlib.SymEnc(userdata.EncryptionKey, userlib.RandomBytes(16), marshalData)
+	macData := userlib.HMACEval(userdata.MACKey, encData)
+	data, _ := json.Marshal(Pair{encData, macData})
+	userlib.DatastoreSet(userdata.UUID, data)
 
 	return &userdata, nil
 }
