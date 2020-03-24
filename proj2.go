@@ -80,10 +80,6 @@ func bytesToUUID(data []byte) (ret uuid.UUID) {
 	}
 	return
 }
-// struct to create pairs
-type Pair struct {
-    a, b byte[]
-}
 
 // The structure definition for a user record
 type User struct {
@@ -145,32 +141,36 @@ func InitUser(username string, password string) (userdataptr *User, err error) {
   // Generate public key for username and add it to the keystore
 	// add privatekey to userdata struct
 	userdata.Username = username
-	userdata.PublicKey, userdata.PrivateKey, errMessage = userlib.DSKeyGen()
 	_, ok := userlib.KeystoreGet(username)
 	if ok {
-			return nil, errors.New(strings.ToTitle("Entry already exists for %s", username)
+			return nil, errors.New(strings.ToTitle("Entry already exists in keystore for" + username))
 	}
+	userdata.PrivateKey, userdata.PublicKey, _ = userlib.DSKeyGen()
 	userlib.KeystoreSet(username, userdata.PublicKey)
 
   // initialize empty userfiles map
-	userdata.files = make(map[string]uuid.UUID)
+	userdata.Files = make(map[string]uuid.UUID)
 
-  // use password to generate symmetric key with public key as salt
-	kp := userlib.Argon2Key(password, userdata.PublicKey, 16)
+  // use password to generate symmetric key with random salt generated from public key
+	salt, _ := json.Marshal(userdata.PublicKey)
+	kp := userlib.Argon2Key([]byte(password), salt, 16)
 
 	// use kp to generate other keys
-	usernameHashKey := userlib.HashKDF(kp, []byte("username hash"))
-	userdata.MACKey = userlib.HashKDF(kp, []byte("MAC"))
-	userdata.EncryptionKey = userlib.HashKDF(kp, []byte("encryption"))
+	usernameHashKey, _ := userlib.HashKDF(kp, []byte("username hash"))
+	mackey, _ := userlib.HashKDF(kp, []byte("MAC"))
+	enckey, _ := userlib.HashKDF(kp, []byte("encryption"))
+	userdata.MACKey, userdata.EncryptionKey = mackey[:16], enckey[:16]
 
   // generate UUID from username and HMAC_usernameHashKey
-	userdata.UUID = userlib.uuid.FromBytes(userlib.HMACEval(usernameHashKey, username))
+	hmac_username, _ := userlib.HMACEval(usernameHashKey[:16], []byte(username))
+	userdata.UUID, _ = uuid.FromBytes(hmac_username)
 
 	// generate encrypted userdata and store in DataStore
 	marshalData, _ := json.Marshal(userdata)
-	encData := userlib.SymEnc(userdata.EncryptionKey, userlib.RandomBytes(16), marshalData)
-	macData := userlib.HMACEval(userdata.MACKey, encData)
-	data, _ := json.Marshal(Pair{encData, macData})
+	iv := userlib.RandomBytes(16)
+	encData:= userlib.SymEnc(userdata.EncryptionKey, iv, marshalData)
+	macData, _ := userlib.HMACEval(userdata.MACKey, encData)
+	data, _ := json.Marshal([2][]byte{encData, macData})
 	userlib.DatastoreSet(userdata.UUID, data)
 
 	return &userdata, nil
@@ -182,6 +182,41 @@ func InitUser(username string, password string) (userdataptr *User, err error) {
 func GetUser(username string, password string) (userdataptr *User, err error) {
 	var userdata User
 	userdataptr = &userdata
+
+	// get public key and check that it exists in keystore
+	pubkey, ok := userlib.KeystoreGet(username)
+	if !ok {
+			return nil, errors.New(strings.ToTitle("Entry does not exist in keystore for" + username))
+	}
+
+	// generate kp to verify signature
+	salt, _ := json.Marshal(pubkey)
+	kp := userlib.Argon2Key([]byte(password), salt, 16)
+
+	// use kp to generate other keys
+	usernameHashKey, _ := userlib.HashKDF(kp, []byte("username hash"))
+	mackey, _ := userlib.HashKDF(kp, []byte("MAC"))
+	enckey, _ := userlib.HashKDF(kp, []byte("encryption"))
+
+	// generate UUID from username and HMAC_usernameHashKey
+	hmac_username, _ := userlib.HMACEval(usernameHashKey[:16], []byte(username))
+	uuid1, _ := uuid.FromBytes(hmac_username)
+
+	// check to see if uuid exists in datastore
+	data, ok := userlib.DatastoreGet(uuid1)
+	if !ok {
+		return nil, errors.New(strings.ToTitle("Entry does not exist in datastore"))
+	}
+
+	// unmarshal and verify data
+	var c [2][]byte
+	json.Unmarshal(data, &c)
+	if macdata, _ := userlib.HMACEval(mackey[:16], c[0]); !userlib.HMACEqual(macdata,c[1]) {
+		return nil, errors.New(strings.ToTitle("Incorrect password or compromised data"))
+	}
+
+	// if data is correct then decrypt it and assign userdatat ptr to it
+	json.Unmarshal(userlib.SymDec(enckey[:16], c[1]), userdataptr)
 
 	return userdataptr, nil
 }
