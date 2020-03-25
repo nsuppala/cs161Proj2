@@ -22,6 +22,12 @@ func clear() {
 	userlib.KeystoreClear()
 }
 
+/* Types of tests we need to write:
+		- empty string filenames
+		- share file, another user appends, original owner loads with changes
+		- share file, revoke, old user with access tries to append and it shouldn't change original file
+*/
+
 func TestInit(t *testing.T) {
 	clear()
 	t.Log("Initialization test")
@@ -75,6 +81,10 @@ func TestStorage(t *testing.T) {
 		t.Error("Downloaded file is not the same", v, v2)
 		return
 	}
+
+	u.AppendFile("file1", []byte("This is also a test"))
+	f2, _ := u.LoadFile("file1")
+	_ = f2
 }
 
 func TestInvalidFile(t *testing.T) {

@@ -330,7 +330,26 @@ func (userdata *User) StoreFile(filename string, data []byte) {
 // existing file, but only whatever additional information and
 // metadata you need.
 func (userdata *User) AppendFile(filename string, data []byte) (err error) {
-	return
+
+	// get FileAccess and FilePrologue for filename
+	prologue, err := getFilePrologue(userdata, filename)
+	if err != nil {
+		return err
+	}
+	access := userdata.Files[filename]
+
+	// Create FileContents and store on datastore with random ID
+	contentsID := uuid.New()
+	contents := FileContents{UUID: contentsID, Data: data}
+	marshalContents, _ := json.Marshal(contents)
+	SecureAndStore(access.EncryptionKey, access.MACKey, contentsID, marshalContents)
+
+	// update FilePrologue contentsegments
+	prologue.ContentSegments = append(prologue.ContentSegments, contentsID)
+	marshalPrologue, _ := json.Marshal(prologue)
+	SecureAndStore(access.EncryptionKey, access.MACKey, prologue.UUID, marshalPrologue)
+
+	return nil
 }
 
 // This loads a file from the Datastore.
@@ -345,6 +364,7 @@ func (userdata *User) LoadFile(filename string) (data []byte, err error) {
 	if err != nil {
 		return nil, err
 	}
+
 	// Loop through all segments and concatenate them
 	fullContents := []byte{}
 	for _, ID := range prologue.ContentSegments {
