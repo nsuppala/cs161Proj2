@@ -91,24 +91,25 @@ type User struct {
 
 	PublicKey     userlib.DSVerifyKey
 	PrivateKey    userlib.DSSignKey
-	Files         map[string]uuid.UUID // Map from filenames to their FileAccess UUIDs
+	Files         map[string]FileAccess // Map from filenames to a FileAccess
 	UUID          uuid.UUID
 	EncryptionKey []byte
 	MACKey        []byte
 }
 
 // Structure definition for a node in the sharing tree
-// Gives information to obtain the parent FileAccess or the FilePrologue
+// All field are for the parent FileAccess or the FilePrologue
 type FileAccess struct {
 	UUID          uuid.UUID
 	EncryptionKey []byte
 	MACKey        []byte
 }
 
-// The structure for file metadata
+// The structure for file's data
+// Sink node in the sharing tree
 type FilePrologue struct {
 	UUID            uuid.UUID
-	Owner           []byte                // Owner's UUID ion datastore server
+	Owner           uuid.UUID             // Owner's UUID ion datastore server
 	ContentSegments []uuid.UUID           // Slice of UUIDs to FileContents parts in order
 	SharedWith      map[string]FileAccess // Map of usernames to the FileAccess issued to them (only tracks direct shares by owner)
 }
@@ -117,6 +118,60 @@ type FilePrologue struct {
 type FileContents struct {
 	UUID uuid.UUID
 	Data []byte
+}
+
+// Helper functions
+
+// Encrypts plaintext data, MACs the encryption, and concetantes them to store on datastore
+func SecureAndStore(encKey []byte, macKey []byte, ID uuid.UUID, marshalData []byte) {
+	iv := userlib.RandomBytes(16)
+	encData := userlib.SymEnc(encKey[:16], iv, marshalData)
+	macData, _ := userlib.HMACEval(macKey[:16], encData)
+	data := append(encData, macData...)
+	userlib.DatastoreSet(ID, data)
+}
+
+// Retrieves an entry on datastore if it exists, verifies its integrity, and decrypts the ciphertext
+func VerifyAndDecrypt(decKey []byte, macKey []byte, ID uuid.UUID) ([]byte, error) {
+	data, ok := userlib.DatastoreGet(ID)
+	if !ok {
+		return nil, errors.New(strings.ToTitle("No entry exists in datastore at UUID"))
+	} else {
+		encData := data[:(len(data) - userlib.HashSize)]
+		macData := data[(len(data) - userlib.HashSize):]
+		macCheck, _ := userlib.HMACEval(macKey[:16], encData)
+		if !userlib.HMACEqual(macData, macCheck) {
+			return nil, errors.New(strings.ToTitle("Incorrect password/keys or compromised data"))
+		}
+		return userlib.SymDec(decKey[:16], encData), nil
+	}
+}
+
+// Generates random encryption and MAC keys
+func GenRandEncMacKeys() (encKey, macKey []byte) {
+	randKey := userlib.RandomBytes(16)
+	encKey, _ = userlib.HashKDF(randKey, []byte("encryption"))
+	macKey, _ = userlib.HashKDF(randKey, []byte("MAC"))
+	return
+}
+
+func getFilePrologue(userdata *User, filename string) (FilePrologue, error) {
+	// get FileAccess
+	access, ok := userdata.Files[filename]
+	if !ok {
+		return FilePrologue{}, errors.New(strings.ToTitle("File does not exist"))
+	}
+
+	// get FilePrologue
+	prologueID := access.UUID
+	decryptedPrologue, err := VerifyAndDecrypt(access.EncryptionKey, access.MACKey, prologueID)
+	if err != nil {
+		return FilePrologue{}, errors.New(strings.ToTitle("FilePrologue has been compromised"))
+	}
+	prologue := FilePrologue{}
+	json.Unmarshal(decryptedPrologue, &prologue)
+
+	return prologue, nil
 }
 
 // This creates a user.  It will only be called once for a user
@@ -138,41 +193,37 @@ func InitUser(username string, password string) (userdataptr *User, err error) {
 	var userdata User
 	userdataptr = &userdata
 
-  // Generate public key for username and add it to the keystore
+	// Generate public key for username and add it to the keystore
 	// add privatekey to userdata struct
 	userdata.Username = username
 	_, ok := userlib.KeystoreGet(username)
 	if ok {
-			return nil, errors.New(strings.ToTitle("Entry already exists in keystore for" + username))
+		return nil, errors.New(strings.ToTitle("Entry already exists in keystore for" + username))
 	}
 	userdata.PrivateKey, userdata.PublicKey, _ = userlib.DSKeyGen()
 	userlib.KeystoreSet(username, userdata.PublicKey)
 
-  // initialize empty userfiles map
-	userdata.Files = make(map[string]uuid.UUID)
+	// initialize empty userfiles map
+	userdata.Files = make(map[string]FileAccess)
 
-  // use password to generate symmetric key with random salt generated from public key
+	// use password to generate symmetric key with public key as salt
 	salt, _ := json.Marshal(userdata.PublicKey)
 	kp := userlib.Argon2Key([]byte(password), salt, 16)
 
 	// use kp to generate other keys
 	usernameHashKey, _ := userlib.HashKDF(kp, []byte("username hash"))
-	mackey, _ := userlib.HashKDF(kp, []byte("MAC"))
-	enckey, _ := userlib.HashKDF(kp, []byte("encryption"))
-	userdata.MACKey, userdata.EncryptionKey = mackey[:16], enckey[:16]
+	macKey, _ := userlib.HashKDF(kp, []byte("MAC"))
+	encKey, _ := userlib.HashKDF(kp, []byte("encryption"))
+	userdata.MACKey, userdata.EncryptionKey = macKey, encKey
 
-  // generate UUID from username and HMAC_usernameHashKey
+	// generate UUID from username and HMAC_usernameHashKey
 	hmac_username, _ := userlib.HMACEval(usernameHashKey[:16], []byte(username))
 	userdata.UUID, _ = uuid.FromBytes(hmac_username)
 
 	// generate encrypted userdata and store in DataStore
 	marshalData, _ := json.Marshal(userdata)
 	//userlib.DebugMsg(string(marshalData) + "\n")
-	iv := userlib.RandomBytes(16)
-	encData:= userlib.SymEnc(userdata.EncryptionKey, iv, marshalData)
-	macData, _ := userlib.HMACEval(userdata.MACKey, encData)
-	data, _ := json.Marshal([2][]byte{encData, macData})
-	userlib.DatastoreSet(userdata.UUID, data)
+	SecureAndStore(encKey, macKey, userdata.UUID, marshalData)
 
 	return &userdata, nil
 }
@@ -187,7 +238,7 @@ func GetUser(username string, password string) (userdataptr *User, err error) {
 	// get public key and check that it exists in keystore
 	pubkey, ok := userlib.KeystoreGet(username)
 	if !ok {
-			return nil, errors.New(strings.ToTitle("Entry does not exist in keystore for" + username))
+		return nil, errors.New(strings.ToTitle("Entry does not exist in keystore for" + username))
 	}
 
 	// generate kp to verify signature
@@ -196,31 +247,21 @@ func GetUser(username string, password string) (userdataptr *User, err error) {
 
 	// use kp to generate other keys
 	usernameHashKey, _ := userlib.HashKDF(kp, []byte("username hash"))
-	mackey, _ := userlib.HashKDF(kp, []byte("MAC"))
-	enckey, _ := userlib.HashKDF(kp, []byte("encryption"))
+	macKey, _ := userlib.HashKDF(kp, []byte("MAC"))
+	encKey, _ := userlib.HashKDF(kp, []byte("encryption"))
 
 	// generate UUID from username and HMAC_usernameHashKey
 	hmac_username, _ := userlib.HMACEval(usernameHashKey[:16], []byte(username))
 	uuid1, _ := uuid.FromBytes(hmac_username)
 
 	// check to see if uuid exists in datastore
-	data, ok := userlib.DatastoreGet(uuid1)
-	if !ok {
-		return nil, errors.New(strings.ToTitle("Entry does not exist in datastore"))
+	// verify, decrypt, and unmarshal
+	decData, err := VerifyAndDecrypt(encKey, macKey, uuid1)
+	if err != nil {
+		return nil, errors.New(strings.ToTitle("Password incorrect or data compromised"))
 	}
-
-	// unmarshal and verify data
-	var c [2][]byte
-	json.Unmarshal(data, &c)
-	macdata, _ := userlib.HMACEval(mackey[:16], c[0])
-	if !userlib.HMACEqual(macdata,c[1]) {
-		return nil, errors.New(strings.ToTitle("Incorrect password or compromised data"))
-	}
-
-	// if data is correct then decrypt it and assign userdatat ptr to it
-	decdata := userlib.SymDec(enckey[:16], c[1])
 	//userlib.DebugMsg(string(decdata) + "\n")
-	json.Unmarshal(decdata, &userdata)
+	json.Unmarshal(decData, &userdata)
 
 	return userdataptr, nil
 }
@@ -231,13 +272,58 @@ func GetUser(username string, password string) (userdataptr *User, err error) {
 // should NOT be revealed to the datastore!
 func (userdata *User) StoreFile(filename string, data []byte) {
 
-	//TODO: This is a toy implementation.
-	UUID, _ := uuid.FromBytes([]byte(filename + userdata.Username)[:16])
-	packaged_data, _ := json.Marshal(data)
-	userlib.DatastoreSet(UUID, packaged_data)
-	//End of toy implementation
+	// If file already exists for user, overwrite it
+	access, ok := userdata.Files[filename]
+	if ok {
+		// Edit and reupload FilePrologue
+		prologueID := access.UUID
+		decryptedPrologue, err := VerifyAndDecrypt(access.EncryptionKey, access.MACKey, prologueID)
+		if err != nil {
+			return
+		}
+		prologue := FilePrologue{}
+		json.Unmarshal(decryptedPrologue, &prologue)
+		prologue.ContentSegments = []uuid.UUID{} // To overwrite, forget previous appends
+		marshalPrologue, _ := json.Marshal(prologue)
+		SecureAndStore(access.EncryptionKey, access.MACKey, prologueID, marshalPrologue)
 
-	return
+		// Edit and Reupload FileContents
+		contentsID := prologue.ContentSegments[0]
+		decryptedContents, err := VerifyAndDecrypt(access.EncryptionKey, access.MACKey, contentsID)
+		if err != nil {
+			return
+		}
+		contents := FileContents{}
+		json.Unmarshal(decryptedContents, &contents)
+		contents.Data = data
+		marshalContents, _ := json.Marshal(contents)
+		SecureAndStore(access.EncryptionKey, access.MACKey, contentsID, marshalContents)
+
+	} else {
+
+		// Generate keys for prologue and contents
+		encKey, macKey := GenRandEncMacKeys()
+
+		// Create FileContents and store on datastore with random ID
+		contentsID := uuid.New()
+		contents := FileContents{UUID: contentsID, Data: data}
+		marshalContents, _ := json.Marshal(contents)
+		SecureAndStore(encKey, macKey, contentsID, marshalContents)
+
+		// Create FilePrologue and store on datastore with random ID
+		prologueID := uuid.New()
+		prologue := FilePrologue{UUID: prologueID, Owner: userdata.UUID, ContentSegments: []uuid.UUID{contentsID}}
+		marshalPrologue, _ := json.Marshal(prologue)
+		SecureAndStore(encKey, macKey, prologueID, marshalPrologue)
+
+		// Create a FileAccess
+		access = FileAccess{UUID: prologueID, EncryptionKey: encKey, MACKey: macKey}
+
+		// Update user's data with new file and override in datastore
+		userdata.Files[filename] = access
+		marshalData, _ := json.Marshal(userdata)
+		SecureAndStore(encKey, macKey, userdata.UUID, marshalData)
+	}
 }
 
 // This adds on to an existing file.
@@ -253,18 +339,29 @@ func (userdata *User) AppendFile(filename string, data []byte) (err error) {
 //
 // It should give an error if the file is corrupted in any way.
 func (userdata *User) LoadFile(filename string) (data []byte, err error) {
-
-	//TODO: This is a toy implementation.
-	UUID, _ := uuid.FromBytes([]byte(filename + userdata.Username)[:16])
-	packaged_data, ok := userlib.DatastoreGet(UUID)
+	access, ok := userdata.Files[filename]
 	if !ok {
-		return nil, errors.New(strings.ToTitle("File not found!"))
+		return nil, errors.New(strings.ToTitle("File does not exist"))
 	}
-	json.Unmarshal(packaged_data, &data)
-	return data, nil
-	//End of toy implementation
-
-	return
+	prologue, err := getFilePrologue(userdata, filename)
+	if err != nil {
+		return nil, err
+	}
+	// Loop through all segments and concatenate them
+	fullContents := []byte{}
+	for _, ID := range prologue.ContentSegments {
+		c, err := VerifyAndDecrypt(access.EncryptionKey, access.MACKey, ID)
+		if err != nil {
+			return nil, err
+		}
+		content := []byte{}
+		err = json.Unmarshal(c, &content)
+		if err != nil {
+			return nil, err
+		}
+		fullContents = append(fullContents, content...)
+	}
+	return fullContents, nil
 }
 
 // This creates a sharing record, which is a key pointing to something
