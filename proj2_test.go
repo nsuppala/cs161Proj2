@@ -42,22 +42,17 @@ func TestInit(t *testing.T) {
 	_ = u1
 	// You probably want many more tests here.
 
-	/* This test below checks that two pointers are the same
-	However, we create different pointers that just point to the same address
-	when he retrieve something from datastore, so this test needs to be modified!
-
 	u2, err1 := GetUser("alice", "fubar")
-	if err != nil {
+	if err1 != nil {
 		t.Error("Failed to get user", err1)
 		return
 	}
-	//t.Log("Got user", u1)
 	//t.Log("Got user", u2)
-	if u2 != u1 {
+	_ = u2
+	if !reflect.DeepEqual(u1, u2) {
 		t.Error("Got incorrect user")
 		return
 	}
-	*/
 }
 
 func TestStorage(t *testing.T) {
@@ -92,7 +87,7 @@ func TestInvalidFile(t *testing.T) {
 
 	_, err2 := u.LoadFile("this file does not exist")
 	if err2 == nil {
-		t.Error("Downloaded a ninexistent file", err2)
+		t.Error("Downloaded a nonexistent file", err2)
 		return
 	}
 }

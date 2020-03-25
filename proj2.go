@@ -222,7 +222,6 @@ func InitUser(username string, password string) (userdataptr *User, err error) {
 
 	// generate encrypted userdata and store in DataStore
 	marshalData, _ := json.Marshal(userdata)
-	//userlib.DebugMsg(string(marshalData) + "\n")
 	SecureAndStore(encKey, macKey, userdata.UUID, marshalData)
 
 	return &userdata, nil
@@ -260,7 +259,6 @@ func GetUser(username string, password string) (userdataptr *User, err error) {
 	if err != nil {
 		return nil, errors.New(strings.ToTitle("Password incorrect or data compromised"))
 	}
-	//userlib.DebugMsg(string(decdata) + "\n")
 	json.Unmarshal(decData, &userdata)
 
 	return userdataptr, nil
@@ -354,12 +352,12 @@ func (userdata *User) LoadFile(filename string) (data []byte, err error) {
 		if err != nil {
 			return nil, err
 		}
-		content := []byte{}
+		var content FileContents
 		err = json.Unmarshal(c, &content)
 		if err != nil {
 			return nil, err
 		}
-		fullContents = append(fullContents, content...)
+		fullContents = append(fullContents, content.Data...)
 	}
 	return fullContents, nil
 }
