@@ -341,7 +341,10 @@ func (userdata *User) StoreFile(filename string, data []byte) {
 
 		// Create FilePrologue and store on datastore with random ID
 		prologueID := uuid.New()
-		prologue := FilePrologue{UUID: prologueID, Owner: userdata.UUID, ContentSegments: []uuid.UUID{contentsID}, SharedWith: make(map[string]FileAccess)}
+		prologue := FilePrologue{UUID: prologueID,
+			Owner:           userdata.UUID,
+			ContentSegments: []uuid.UUID{contentsID},
+			SharedWith:      make(map[string]FileAccess)}
 		marshalPrologue, _ := json.Marshal(prologue)
 		SecureAndStore(encKey, macKey, prologueID, marshalPrologue)
 
@@ -527,5 +530,65 @@ func (userdata *User) ReceiveFile(filename string, sender string,
 
 // Removes target user's access.
 func (userdata *User) RevokeFile(filename string, target_username string) (err error) {
-	return
+	// get FileAccess and FilePrologue
+	access, prologue, err := getFileAccessAndFilePrologue(userdata, filename)
+
+	// Check if owner is revoking
+	if err != nil {
+		return err
+	}
+	if prologue.Owner != userdata.UUID {
+		return errors.New("non-owners may not revoke permission")
+	}
+
+	// Check if file exists
+	_, ok := userdata.Files[filename]
+	if !ok {
+		return errors.New("file does not exist")
+	}
+
+	// Remove target from SharedWith
+	_, ok := prologue.SharedWith[target_username]
+	if !ok {
+		return errors.New("target is not shared with")
+	}
+	delete(prologue.SharedWith, target_username)
+
+	// Generate new keys
+	encKey, macKey := GenRandEncMacKeys()
+
+	// Re-encrypt all file segments
+	for _, ID := range prologue.ContentSegments {
+		// Get, verify, and decrypt segment
+		segment, err := VerifyAndDecrypt(access.EncryptionKey, access.MACKey, ID)
+		if err != nil {
+			return err
+		}
+		// Update segment and override on datastore
+		SecureAndStore(encKey, macKey, ID, segment)
+	}
+
+	// Update owner's FileAccess and override userdata on datastore
+	access.EncryptionKey = encKey
+	access.MACKey = macKey
+	userdata.Files[filename] = access
+	data, _ := json.Marshal(userdata)
+	SecureAndStore(userdata.EncryptionKey, userdata.MACKey, userdata.UUID, data)
+
+	// Update FileAccess copy for each remaining children
+	for _, childFA := range prologue.SharedWith {
+		// Get original FileAccess copy
+		fa, err := VerifyAndDecrypt(childFA.EncryptionKey, childFA.MACKey, childFA.UUID)
+		if err != nil {
+			return errors.New("Access has been compromised")
+		}
+		// Update copy
+		var ogFA FileAccess
+		json.Unmarshal(fa, &ogFA)
+		ogFA.EncryptionKey = encKey
+		ogFA.MACKey = macKey
+		updated, _ := json.Marshal(ogFA)
+		SecureAndStore(childFA.EncryptionKey, childFA.MACKey, childFA.UUID, updated)
+	}
+	return nil
 }
