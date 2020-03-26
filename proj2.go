@@ -89,9 +89,7 @@ type User struct {
 	// Note for JSON to marshal/unmarshal, the fields need to
 	// be public (start with a capital letter)
 
-	VerifyKey     userlib.DSVerifyKey
 	SignKey       userlib.DSSignKey
-	PKEEncKey     userlib.PKEEncKey
 	PKEDecKey     userlib.PKEDecKey
 	Files         map[string]FileAccess // Map from filenames to a FileAccess
 	UUID          uuid.UUID
@@ -159,7 +157,15 @@ func GenRandEncMacKeys() (encKey, macKey []byte) {
 	randKey := userlib.RandomBytes(16)
 	encKey, _ = userlib.HashKDF(randKey, []byte("encryption"))
 	macKey, _ = userlib.HashKDF(randKey, []byte("MAC"))
-	return
+	return encKey[:16], macKey[:16]
+}
+
+func didCorrectlyUnmarshalAccessToken(access FileAccess) bool {
+	return access.UUID != (uuid.UUID{}) && access.EncryptionKey != nil && access.MACKey != nil
+}
+
+func didCorrectlyUnmarshalFilePrologue(prologue FilePrologue) bool {
+	return prologue.ContentSegments != nil && prologue.Owner != (uuid.UUID{})
 }
 
 // Returns the ORIGINAL FileAccess and FilePrologue for a file
@@ -167,16 +173,27 @@ func getFileAccessAndFilePrologue(userdata *User, filename string) (FileAccess, 
 	// get user's FileAccess
 	access, ok := userdata.Files[filename]
 	if !ok {
-		return FileAccess{}, FilePrologue{}, errors.New(strings.ToTitle("File does not exist"))
+		return FileAccess{}, FilePrologue{}, errors.New("File does not exist")
 	}
 
 	// walk up tree to reach FilePrologue
+	prev, curr := FileAccess{}, access
+	for didCorrectlyUnmarshalAccessToken(curr) {
+		data, err := VerifyAndDecrypt(curr.EncryptionKey, curr.MACKey, curr.UUID)
+		if err != nil {
+			return FileAccess{}, FilePrologue{}, errors.New("Access data has been compromised")
+		}
+		prev = curr
+		curr = FileAccess{}
+		json.Unmarshal(data, &curr)
+	}
+	access = prev
 
 	// get FilePrologue
 	prologueID := access.UUID
 	decryptedPrologue, err := VerifyAndDecrypt(access.EncryptionKey, access.MACKey, prologueID)
 	if err != nil {
-		return FileAccess{}, FilePrologue{}, errors.New(strings.ToTitle("Do not have access to file or file has been compromised"))
+		return FileAccess{}, FilePrologue{}, errors.New("Do not have access to file or file has been compromised")
 	}
 	prologue := FilePrologue{}
 	json.Unmarshal(decryptedPrologue, &prologue)
@@ -210,17 +227,18 @@ func InitUser(username string, password string) (userdataptr *User, err error) {
 	if ok {
 		return nil, errors.New("entry already exists in keystore for" + username)
 	}
-	userdata.PKEEncKey, userdata.PKEDecKey, _ = userlib.PKEKeyGen()
-	userdata.SignKey, userdata.VerifyKey, _ = userlib.DSKeyGen()
-
-	userlib.KeystoreSet((username + "_encryption"), userdata.PKEEncKey)
-	userlib.KeystoreSet((username + "_verify"), userdata.VerifyKey)
+	pkeEncKey, pkeDecKey, _ := userlib.PKEKeyGen()
+	signKey, verifyKey, _ := userlib.DSKeyGen()
+	userdata.PKEDecKey = pkeDecKey
+	userdata.SignKey = signKey
+	userlib.KeystoreSet((username + "_encryption"), pkeEncKey)
+	userlib.KeystoreSet((username + "_verify"), verifyKey)
 
 	// initialize empty userfiles map
 	userdata.Files = make(map[string]FileAccess)
 
 	// use password to generate symmetric key with public key as salt
-	salt, _ := json.Marshal(userdata.PKEEncKey)
+	salt, _ := json.Marshal(pkeEncKey)
 	kp := userlib.Argon2Key([]byte(password), salt, 16)
 
 	// use kp to generate other keys
@@ -248,13 +266,13 @@ func GetUser(username string, password string) (userdataptr *User, err error) {
 	userdataptr = &userdata
 
 	// get public encryption key and check that it exists in keystore
-	pubkey, ok := userlib.KeystoreGet(username + "_encryption")
+	pkeEncKey, ok := userlib.KeystoreGet(username + "_encryption")
 	if !ok {
 		return nil, errors.New("encryption key does not exist for" + username)
 	}
 
 	// generate kp to verify signature
-	salt, _ := json.Marshal(pubkey)
+	salt, _ := json.Marshal(pkeEncKey)
 	kp := userlib.Argon2Key([]byte(password), salt, 16)
 
 	// use kp to generate other keys
@@ -323,7 +341,7 @@ func (userdata *User) StoreFile(filename string, data []byte) {
 
 		// Create FilePrologue and store on datastore with random ID
 		prologueID := uuid.New()
-		prologue := FilePrologue{UUID: prologueID, Owner: userdata.UUID, ContentSegments: []uuid.UUID{contentsID}}
+		prologue := FilePrologue{UUID: prologueID, Owner: userdata.UUID, ContentSegments: []uuid.UUID{contentsID}, SharedWith: make(map[string]FileAccess)}
 		marshalPrologue, _ := json.Marshal(prologue)
 		SecureAndStore(encKey, macKey, prologueID, marshalPrologue)
 
