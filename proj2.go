@@ -317,7 +317,7 @@ func (userdata *User) StoreFile(filename string, data []byte) {
 		SecureAndStore(access.EncryptionKey, access.MACKey, prologueID, marshalPrologue)
 
 		// Edit and Reupload FileContents
-		contentsID := prologue.ContentSegments[0]
+		contentsID := uuid.New()
 		decryptedContents, err := VerifyAndDecrypt(access.EncryptionKey, access.MACKey, contentsID)
 		if err != nil {
 			return
@@ -547,8 +547,10 @@ func (userdata *User) RevokeFile(filename string, target_username string) (err e
 		return errors.New("file does not exist")
 	}
 
+	_, err = userdata.LoadFile(filename)
+
 	// Remove target from SharedWith
-	_, ok := prologue.SharedWith[target_username]
+	_, ok = prologue.SharedWith[target_username]
 	if !ok {
 		return errors.New("target is not shared with")
 	}

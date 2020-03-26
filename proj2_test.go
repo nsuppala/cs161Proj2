@@ -26,6 +26,7 @@ func clear() {
 		- empty string filenames
 		- share file, another user appends, original owner loads with changes
 		- share file, revoke, old user with access tries to append and it shouldn't change original file
+		- trying to revoke a file from someone who doesn't have access
 */
 
 func TestInit(t *testing.T) {
@@ -85,6 +86,11 @@ func TestStorage(t *testing.T) {
 	u.AppendFile("file1", []byte("This is also a test"))
 	f2, _ := u.LoadFile("file1")
 	_ = f2
+
+	if reflect.DeepEqual(f2, v2) {
+		t.Error("File did not append")
+		return
+	}
 }
 
 func TestInvalidFile(t *testing.T) {
@@ -145,6 +151,44 @@ func TestShare(t *testing.T) {
 	}
 	if !reflect.DeepEqual(v, v2) {
 		t.Error("Shared file is not the same", v, v2)
+		return
+	}
+}
+
+func TestRevokeFile( t *testing.T) {
+	clear()
+	u, _ := InitUser("alice", "fubar")
+	u2, _ := InitUser("bob", "foobar")
+	u3, _ := InitUser("eve", "barfoo")
+
+	v := []byte("This is a test")
+	u.StoreFile("file1", v)
+
+	var v2 []byte
+	var magic_string string
+
+	// share with bob
+	v, _ = u.LoadFile("file1")
+	magic_string, _ = u.ShareFile("file1", "bob")
+	_ = u2.ReceiveFile("file2", "alice", magic_string)
+	v2, _ = u2.LoadFile("file2")
+	_ = v2
+
+	// share with eve
+	magic_string2, _ := u.ShareFile("file1", "eve")
+	_ = u3.ReceiveFile("file3", "alice", magic_string2)
+	v3, _ := u3.LoadFile("file3")
+	_ = v3
+
+	// revoke file from eve
+	_ = u.RevokeFile("file3", "eve")
+
+	// eve shouldn't be able to append
+	v4 := u3.AppendFile("file3", []byte("This is also a file"))
+	v5, _ := u.LoadFile("file1")
+
+	if reflect.DeepEqual(v4, v5) {
+		t.Error("Eve was able to append after revoke")
 		return
 	}
 
