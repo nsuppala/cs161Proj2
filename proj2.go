@@ -89,8 +89,10 @@ type User struct {
 	// Note for JSON to marshal/unmarshal, the fields need to
 	// be public (start with a capital letter)
 
-	PublicKey     userlib.DSVerifyKey
-	PrivateKey    userlib.DSSignKey
+	VerifyKey     userlib.DSVerifyKey
+	SignKey       userlib.DSSignKey
+	PKEEncKey     userlib.PKEEncKey
+	PKEDecKey     userlib.PKEDecKey
 	Files         map[string]FileAccess // Map from filenames to a FileAccess
 	UUID          uuid.UUID
 	EncryptionKey []byte
@@ -206,16 +208,19 @@ func InitUser(username string, password string) (userdataptr *User, err error) {
 	userdata.Username = username
 	_, ok := userlib.KeystoreGet(username)
 	if ok {
-		return nil, errors.New(strings.ToTitle("Entry already exists in keystore for" + username))
+		return nil, errors.New("entry already exists in keystore for" + username)
 	}
-	userdata.PrivateKey, userdata.PublicKey, _ = userlib.DSKeyGen()
-	userlib.KeystoreSet(username, userdata.PublicKey)
+	userdata.PKEEncKey, userdata.PKEDecKey, _ = userlib.PKEKeyGen()
+	userdata.SignKey, userdata.VerifyKey, _ = userlib.DSKeyGen()
+
+	userlib.KeystoreSet((username + "_encryption"), userdata.PKEEncKey)
+	userlib.KeystoreSet((username + "_verify"), userdata.VerifyKey)
 
 	// initialize empty userfiles map
 	userdata.Files = make(map[string]FileAccess)
 
 	// use password to generate symmetric key with public key as salt
-	salt, _ := json.Marshal(userdata.PublicKey)
+	salt, _ := json.Marshal(userdata.PKEEncKey)
 	kp := userlib.Argon2Key([]byte(password), salt, 16)
 
 	// use kp to generate other keys
@@ -242,10 +247,10 @@ func GetUser(username string, password string) (userdataptr *User, err error) {
 	var userdata User
 	userdataptr = &userdata
 
-	// get public key and check that it exists in keystore
-	pubkey, ok := userlib.KeystoreGet(username)
+	// get public encryption key and check that it exists in keystore
+	pubkey, ok := userlib.KeystoreGet(username + "_encryption")
 	if !ok {
-		return nil, errors.New(strings.ToTitle("Entry does not exist in keystore for" + username))
+		return nil, errors.New("encryption key does not exist for" + username)
 	}
 
 	// generate kp to verify signature
@@ -265,7 +270,7 @@ func GetUser(username string, password string) (userdataptr *User, err error) {
 	// verify, decrypt, and unmarshal
 	decData, err := VerifyAndDecrypt(encKey, macKey, uuid1)
 	if err != nil {
-		return nil, errors.New(strings.ToTitle("Password incorrect or data compromised"))
+		return nil, errors.New("password incorrect or data compromised")
 	}
 	json.Unmarshal(decData, &userdata)
 
@@ -401,29 +406,40 @@ func (userdata *User) ShareFile(filename string, recipient string) (
 	// Create a copy of user's FileAccess
 	access, ok := userdata.Files[filename]
 	if !ok {
-		return "", errors.New(strings.ToTitle("File does not exist"))
+		return "", errors.New("File does not exist")
 	}
-	copy := FileAccess{access.UUID, access.EncryptionKey, access.MACKey}
+	copy := access
 
 	// Store copy on datastore
 	encKey, macKey := GenRandEncMacKeys()
 	ID := uuid.New()
 	marshalCopy, err := json.Marshal(copy)
+	if err != nil {
+		return "", err
+	}
 	SecureAndStore(encKey, macKey, ID, marshalCopy)
 
 	// Create new FileAccess node for shared user that points to copy
 	recipientFA := FileAccess{ID, encKey, macKey}
 
 	// Sign and encrypt new FileAccess node to create token
-	pubKey, ok := userlib.KeystoreGet(recipient)
+	pkeEncKey, ok := userlib.KeystoreGet(recipient + "_encryption")
 	if !ok {
-		return "", errors.New(strings.ToTitle("Invalid recipient"))
+		return "", errors.New("Invalid recipient")
 	}
-	signKey := userdata.PrivateKey
+	signKey := userdata.SignKey
 	marshalFA, err := json.Marshal(recipientFA)
-	encData, err := userlib.PKEEnc(pubKey, marshalFA)
+	if err != nil {
+		return "", err
+	}
+	encData, err := userlib.PKEEnc(pkeEncKey, marshalFA)
+	if err != nil {
+		return "", err
+	}
 	signedData, err := userlib.DSSign(signKey, encData)
-
+	if err != nil {
+		return "", err
+	}
 	token := SharingToken{encData, signedData}
 	marshalToken, _ := json.Marshal(token)
 
@@ -431,9 +447,15 @@ func (userdata *User) ShareFile(filename string, recipient string) (
 
 	// If user if owner, update FilePrologue and override on datastore
 	_, prologue, err := getFileAccessAndFilePrologue(userdata, filename)
+	if err != nil {
+		return "", err
+	}
 	if prologue.Owner == userdata.UUID {
 		prologue.SharedWith[recipient] = recipientFA
-		data, _ := json.Marshal(prologue)
+		data, err := json.Marshal(prologue)
+		if err != nil {
+			return "", err
+		}
 		SecureAndStore(access.EncryptionKey, access.MACKey, access.UUID, data)
 	}
 	return
@@ -443,27 +465,46 @@ func (userdata *User) ShareFile(filename string, recipient string) (
 // The recipient should not be able to discover the sender's view on
 // what the filename even is!  However, the recipient must ensure that
 // it is authentically from the sender.
-func (userdata *User) ReceiveFile(filename string, sender string, magic_string string) error {
+func (userdata *User) ReceiveFile(filename string, sender string,
+	magic_string string) error {
+	// Check if user already has file
+	_, ok := userdata.Files[filename]
+	if ok {
+		return errors.New("file name already exists")
+	}
+
+	// Extract token information
 	var token SharingToken
 	json.Unmarshal([]byte(magic_string), &token)
 	encData := token.Encyption
 	signedData := token.SignedEncryption
 
-	// Verify and decrypt
-	decryptKey := userdata.PrivateKey
-	verifyKey, _ := userlib.KeystoreGet(sender)
+	// Verify and decrypt to get FileAccess
+	decryptKey := userdata.PKEDecKey
+	verifyKey, ok := userlib.KeystoreGet(sender + "_verify")
+	if !ok {
+		return errors.New("could not fetch sender verify key")
+	}
 	err := userlib.DSVerify(verifyKey, encData, signedData)
 	if err != nil {
 		return err
 	}
-	decrypted, _ := userlib.PKEDec(decryptKey, encData)
+	decrypted, err := userlib.PKEDec(decryptKey, encData)
+	if err != nil {
+		return err
+	}
 
 	// Add FileAccess to userdata and update on datastore
 	var access FileAccess
 	json.Unmarshal(decrypted, &access)
 	userdata.Files[filename] = access
-	data, _ := json.Marshal(userdata)
+	data, err := json.Marshal(userdata)
+	if err != nil {
+		return err
+	}
 	SecureAndStore(userdata.EncryptionKey, userdata.MACKey, userdata.UUID, data)
+
+	return nil
 }
 
 // Removes target user's access.
