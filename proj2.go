@@ -551,6 +551,7 @@ func (userdata *User) RevokeFile(filename string, target_username string) (err e
 
 	// Remove target from SharedWith
 	_, ok = prologue.SharedWith[target_username]
+	//userlib.DebugMsg("Files: %v", prologue.SharedWith)
 	if !ok {
 		return errors.New("target is not shared with")
 	}
@@ -569,6 +570,8 @@ func (userdata *User) RevokeFile(filename string, target_username string) (err e
 		// Update segment and override on datastore
 		SecureAndStore(encKey, macKey, ID, segment)
 	}
+	marshalPrologue, _ := json.Marshal(prologue)
+	SecureAndStore(encKey, macKey, prologue.UUID, marshalPrologue)
 
 	// Update owner's FileAccess and override userdata on datastore
 	access.EncryptionKey = encKey

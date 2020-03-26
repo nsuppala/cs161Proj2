@@ -181,7 +181,7 @@ func TestRevokeFile( t *testing.T) {
 	_ = v3
 
 	// revoke file from eve
-	_ = u.RevokeFile("file3", "eve")
+	_ = u.RevokeFile("file1", "eve")
 
 	// eve shouldn't be able to append
 	v4 := u3.AppendFile("file3", []byte("This is also a file"))
@@ -190,6 +190,11 @@ func TestRevokeFile( t *testing.T) {
 	if reflect.DeepEqual(v4, v5) {
 		t.Error("Eve was able to append after revoke")
 		return
+	}
+
+	err := u.RevokeFile("file1", "eve")
+	if err != nil {
+		t.Error("Should error because file is no longer shared with Eve")
 	}
 
 }
