@@ -120,9 +120,14 @@ type FileContents struct {
 	Data []byte
 }
 
+type SharingToken struct {
+	Encyption        []byte
+	SignedEncryption []byte
+}
+
 // Helper functions
 
-// Encrypts plaintext data, MACs the encryption, and concetantes them to store on datastore
+// Symmetric key encrypts plaintext data, MACs the encryption, and concetantes them to store on datastore
 func SecureAndStore(encKey []byte, macKey []byte, ID uuid.UUID, marshalData []byte) {
 	iv := userlib.RandomBytes(16)
 	encData := userlib.SymEnc(encKey[:16], iv, marshalData)
@@ -155,23 +160,26 @@ func GenRandEncMacKeys() (encKey, macKey []byte) {
 	return
 }
 
-func getFilePrologue(userdata *User, filename string) (FilePrologue, error) {
-	// get FileAccess
+// Returns the ORIGINAL FileAccess and FilePrologue for a file
+func getFileAccessAndFilePrologue(userdata *User, filename string) (FileAccess, FilePrologue, error) {
+	// get user's FileAccess
 	access, ok := userdata.Files[filename]
 	if !ok {
-		return FilePrologue{}, errors.New(strings.ToTitle("File does not exist"))
+		return FileAccess{}, FilePrologue{}, errors.New(strings.ToTitle("File does not exist"))
 	}
+
+	// walk up tree to reach FilePrologue
 
 	// get FilePrologue
 	prologueID := access.UUID
 	decryptedPrologue, err := VerifyAndDecrypt(access.EncryptionKey, access.MACKey, prologueID)
 	if err != nil {
-		return FilePrologue{}, errors.New(strings.ToTitle("FilePrologue has been compromised"))
+		return FileAccess{}, FilePrologue{}, errors.New(strings.ToTitle("Do not have access to file or file has been compromised"))
 	}
 	prologue := FilePrologue{}
 	json.Unmarshal(decryptedPrologue, &prologue)
 
-	return prologue, nil
+	return access, prologue, nil
 }
 
 // This creates a user.  It will only be called once for a user
@@ -332,11 +340,10 @@ func (userdata *User) StoreFile(filename string, data []byte) {
 func (userdata *User) AppendFile(filename string, data []byte) (err error) {
 
 	// get FileAccess and FilePrologue for filename
-	prologue, err := getFilePrologue(userdata, filename)
+	access, prologue, err := getFileAccessAndFilePrologue(userdata, filename)
 	if err != nil {
 		return err
 	}
-	access := userdata.Files[filename]
 
 	// Create FileContents and store on datastore with random ID
 	contentsID := uuid.New()
@@ -356,11 +363,7 @@ func (userdata *User) AppendFile(filename string, data []byte) (err error) {
 //
 // It should give an error if the file is corrupted in any way.
 func (userdata *User) LoadFile(filename string) (data []byte, err error) {
-	access, ok := userdata.Files[filename]
-	if !ok {
-		return nil, errors.New(strings.ToTitle("File does not exist"))
-	}
-	prologue, err := getFilePrologue(userdata, filename)
+	access, prologue, err := getFileAccessAndFilePrologue(userdata, filename)
 	if err != nil {
 		return nil, err
 	}
@@ -395,6 +398,44 @@ func (userdata *User) LoadFile(filename string) (data []byte, err error) {
 func (userdata *User) ShareFile(filename string, recipient string) (
 	magic_string string, err error) {
 
+	// Create a copy of user's FileAccess
+	access, ok := userdata.Files[filename]
+	if !ok {
+		return "", errors.New(strings.ToTitle("File does not exist"))
+	}
+	copy := FileAccess{access.UUID, access.EncryptionKey, access.MACKey}
+
+	// Store copy on datastore
+	encKey, macKey := GenRandEncMacKeys()
+	ID := uuid.New()
+	marshalCopy, err := json.Marshal(copy)
+	SecureAndStore(encKey, macKey, ID, marshalCopy)
+
+	// Create new FileAccess node for shared user that points to copy
+	recipientFA := FileAccess{ID, encKey, macKey}
+
+	// Sign and encrypt new FileAccess node to create token
+	pubKey, ok := userlib.KeystoreGet(recipient)
+	if !ok {
+		return "", errors.New(strings.ToTitle("Invalid recipient"))
+	}
+	signKey := userdata.PrivateKey
+	marshalFA, err := json.Marshal(recipientFA)
+	encData, err := userlib.PKEEnc(pubKey, marshalFA)
+	signedData, err := userlib.DSSign(signKey, encData)
+
+	token := SharingToken{encData, signedData}
+	marshalToken, _ := json.Marshal(token)
+
+	magic_string = string(marshalToken)
+
+	// If user if owner, update FilePrologue and override on datastore
+	_, prologue, err := getFileAccessAndFilePrologue(userdata, filename)
+	if prologue.Owner == userdata.UUID {
+		prologue.SharedWith[recipient] = recipientFA
+		data, _ := json.Marshal(prologue)
+		SecureAndStore(access.EncryptionKey, access.MACKey, access.UUID, data)
+	}
 	return
 }
 
@@ -402,9 +443,27 @@ func (userdata *User) ShareFile(filename string, recipient string) (
 // The recipient should not be able to discover the sender's view on
 // what the filename even is!  However, the recipient must ensure that
 // it is authentically from the sender.
-func (userdata *User) ReceiveFile(filename string, sender string,
-	magic_string string) error {
-	return nil
+func (userdata *User) ReceiveFile(filename string, sender string, magic_string string) error {
+	var token SharingToken
+	json.Unmarshal([]byte(magic_string), &token)
+	encData := token.Encyption
+	signedData := token.SignedEncryption
+
+	// Verify and decrypt
+	decryptKey := userdata.PrivateKey
+	verifyKey, _ := userlib.KeystoreGet(sender)
+	err := userlib.DSVerify(verifyKey, encData, signedData)
+	if err != nil {
+		return err
+	}
+	decrypted, _ := userlib.PKEDec(decryptKey, encData)
+
+	// Add FileAccess to userdata and update on datastore
+	var access FileAccess
+	json.Unmarshal(decrypted, &access)
+	userdata.Files[filename] = access
+	data, _ := json.Marshal(userdata)
+	SecureAndStore(userdata.EncryptionKey, userdata.MACKey, userdata.UUID, data)
 }
 
 // Removes target user's access.
