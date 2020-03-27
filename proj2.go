@@ -551,7 +551,7 @@ func (userdata *User) RevokeFile(filename string, target_username string) (err e
 
 	// Remove target from SharedWith
 	_, ok = prologue.SharedWith[target_username]
-	//userlib.DebugMsg("Files: %v", prologue.SharedWith)
+	//userlib.DebugMsg("Files: %v", ok)
 	if !ok {
 		return errors.New("target is not shared with")
 	}
