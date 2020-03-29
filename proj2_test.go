@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/cs161-staff/userlib"
+	"github.com/google/uuid"
 	_ "github.com/google/uuid"
 )
 
@@ -23,11 +24,11 @@ func clear() {
 }
 
 /* Types of tests we need to write:
-		- empty string filenames
-		- share file, another user appends, original owner loads with changes
-		- share file, revoke, old user with access tries to append and it shouldn't change original file
-		- trying to revoke a file from someone who doesn't have access
-		- someone who is not the owner is trying to revoke
+- empty string filenames
+- share file, another user appends, original owner loads with changes
+- share file, revoke, old user with access tries to append and it shouldn't change original file
+- trying to revoke a file from someone who doesn't have access
+- someone who is not the owner is trying to revoke
 */
 
 func TestInit(t *testing.T) {
@@ -43,12 +44,38 @@ func TestInit(t *testing.T) {
 		t.Error("Failed to initialize user", err)
 		return
 	}
+	if (reflect.DeepEqual(u1.SignKey, userlib.DSSignKey{})) ||
+		(reflect.DeepEqual(u1.PKEDecKey, userlib.PKEDecKey{})) ||
+		(u1.Files == nil) || (u1.UUID == uuid.UUID{}) ||
+		(len(u1.EncryptionKey) == 0) ||
+		(len(u1.MACKey) == 0) {
+		t.Error("Failed to initialize all user fields", err)
+		return
+	}
 	// t.Log() only produces output if you run with "go test -v"
 	//t.Log("Got user", u1)
 	// If you want to comment the line above,
 	// write _ = u1 here to make the compiler happy
-	_ = u1
 	// You probably want many more tests here.
+	u4, err := InitUser("bob", "fubar")
+	if err != nil {
+		// t.Error says the test fails
+		t.Error("Failed to initialize user", err)
+		return
+	}
+	_ = u4
+	u2, err := InitUser("alice", "foobar")
+	if err == nil {
+		t.Error("Cannot initialize two users with same name")
+		return
+	}
+	_ = u2
+	u3, err := InitUser("", "foobar")
+	if err == nil {
+		t.Error("Empty string used as username")
+		return
+	}
+	_ = u3
 }
 
 func TestGetUser(t *testing.T) {
@@ -61,7 +88,7 @@ func TestGetUser(t *testing.T) {
 		return
 	}
 
-		_ = u1
+	_ = u1
 	u2, err1 := GetUser("alice", "fubar")
 	if err1 != nil {
 		t.Error("Failed to get user", err1)
@@ -71,6 +98,16 @@ func TestGetUser(t *testing.T) {
 	_ = u2
 	if !reflect.DeepEqual(u1, u2) {
 		t.Error("Got incorrect user")
+		return
+	}
+	_, err = GetUser("alice", "foobar")
+	if err == nil {
+		t.Error("Did not detect incorrect password")
+		return
+	}
+	_, err = GetUser("bob", "foobar")
+	if err == nil {
+		t.Error("Did not detect user does not exist")
 		return
 	}
 }
@@ -101,6 +138,25 @@ func TestStorage(t *testing.T) {
 	_ = f2
 
 	if reflect.DeepEqual(f2, v2) {
+		t.Error("File did not append")
+		return
+	}
+	// Test empty file contents
+	v = []byte("")
+	u.StoreFile("file2", v)
+	v3, err3 := u.LoadFile("file2")
+	if err3 != nil {
+		t.Error("Failed to upload empty file", err3)
+		return
+	}
+	if !reflect.DeepEqual(v, v3) {
+		t.Error("Downloaded file is not the same", v, v3)
+		return
+	}
+	// Append empty contents
+	_ = u.AppendFile("file1", v)
+	f3, _ := u.LoadFile("file1")
+	if !reflect.DeepEqual(f2, f3) {
 		t.Error("File did not append")
 		return
 	}
@@ -169,16 +225,8 @@ func TestInvalidFile(t *testing.T) {
 
 func TestShare(t *testing.T) {
 	clear()
-	u, err := InitUser("alice", "fubar")
-	if err != nil {
-		t.Error("Failed to initialize user", err)
-		return
-	}
-	u2, err2 := InitUser("bob", "foobar")
-	if err2 != nil {
-		t.Error("Failed to initialize bob", err2)
-		return
-	}
+	u, _ := InitUser("alice", "fubar")
+	u2, _ := InitUser("bob", "foobar")
 
 	v := []byte("This is a test")
 	u.StoreFile("file1", v)
@@ -186,7 +234,7 @@ func TestShare(t *testing.T) {
 	var v2 []byte
 	var magic_string string
 
-	v, err = u.LoadFile("file1")
+	v, err := u.LoadFile("file1")
 	if err != nil {
 		t.Error("Failed to download the file from alice", err)
 		return
@@ -212,9 +260,21 @@ func TestShare(t *testing.T) {
 		t.Error("Shared file is not the same", v, v2)
 		return
 	}
+	// Should error when sharing a file you don't have
+	magic_string, err = u.ShareFile("file3", "bob")
+	if err == nil {
+		t.Error("Should error when sharing a file that does not exist")
+		return
+	}
+	// Cannot share with user that doesn't exist
+	magic_string, err = u.ShareFile("file3", "malice")
+	if err == nil {
+		t.Error("Cannot share with user that doesn't exist")
+		return
+	}
 }
 
-func TestMultiLevelSharing (t *testing.T) {
+func TestMultiLevelSharing(t *testing.T) {
 	clear()
 	u, err := InitUser("alice", "fubar")
 	if err != nil {
@@ -229,7 +289,6 @@ func TestMultiLevelSharing (t *testing.T) {
 
 	//u3, _ := InitUser("eve", "barfoo")
 	u4, _ := InitUser("charlie", "bar")
-
 
 	v := []byte("This is a test")
 	u.StoreFile("file1", v)

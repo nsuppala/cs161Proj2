@@ -219,12 +219,17 @@ func getFileAccessAndFilePrologue(userdata *User, filename string) (FileAccess, 
 func InitUser(username string, password string) (userdataptr *User, err error) {
 	var userdata User
 	userdataptr = &userdata
+	// Check is username is empty
+	if len(username) == 0 {
+		return nil, errors.New("username cannot be empty")
+	}
 
 	// Generate public key for username and add it to the keystore
 	// add privatekey to userdata struct
 	userdata.Username = username
-	_, ok := userlib.KeystoreGet(username)
-	if ok {
+	_, ok := userlib.KeystoreGet(username + "_encryption")
+	_, ok1 := userlib.KeystoreGet(username + "_verify")
+	if ok || ok1 {
 		return nil, errors.New("entry already exists in keystore for" + username)
 	}
 	pkeEncKey, pkeDecKey, _ := userlib.PKEKeyGen()
@@ -249,7 +254,7 @@ func InitUser(username string, password string) (userdataptr *User, err error) {
 
 	// generate UUID from username and HMAC_usernameHashKey
 	hmac_username, _ := userlib.HMACEval(usernameHashKey[:16], []byte(username))
-	userdata.UUID, _ = uuid.FromBytes(hmac_username)
+	userdata.UUID, _ = uuid.FromBytes(hmac_username[:16])
 
 	// generate encrypted userdata and store in DataStore
 	marshalData, _ := json.Marshal(userdata)
@@ -282,11 +287,11 @@ func GetUser(username string, password string) (userdataptr *User, err error) {
 
 	// generate UUID from username and HMAC_usernameHashKey
 	hmac_username, _ := userlib.HMACEval(usernameHashKey[:16], []byte(username))
-	uuid1, _ := uuid.FromBytes(hmac_username)
+	uuid1, _ := uuid.FromBytes(hmac_username[:16])
 
 	// check to see if uuid exists in datastore
 	// verify, decrypt, and unmarshal
-	decData, err := VerifyAndDecrypt(encKey, macKey, uuid1)
+	decData, err := VerifyAndDecrypt(encKey[:16], macKey[:16], uuid1)
 	if err != nil {
 		return nil, errors.New("password incorrect or data compromised")
 	}
