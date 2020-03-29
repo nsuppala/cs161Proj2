@@ -140,11 +140,14 @@ func VerifyAndDecrypt(decKey []byte, macKey []byte, ID uuid.UUID) ([]byte, error
 	if !ok {
 		return nil, errors.New(strings.ToTitle("No entry exists in datastore at UUID"))
 	} else {
+		if len(data)-userlib.HashSize < 0 {
+			return nil, errors.New("data tampered with")
+		}
 		encData := data[:(len(data) - userlib.HashSize)]
 		macData := data[(len(data) - userlib.HashSize):]
 		macCheck, _ := userlib.HMACEval(macKey[:16], encData)
 		if !userlib.HMACEqual(macData, macCheck) {
-			return nil, errors.New(strings.ToTitle("Incorrect password/keys or compromised data"))
+			return nil, errors.New("Incorrect password/keys or compromised data")
 		}
 		return userlib.SymDec(decKey[:16], encData), nil
 	}
