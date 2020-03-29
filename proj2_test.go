@@ -121,10 +121,20 @@ func TestStorage(t *testing.T) {
 	}
 
 	v := []byte("This is a test")
+	v2, err2 := u.LoadFile("file1")
+	if err2 == nil {
+		t.Error("load should fail because no file has been stored", err2)
+		return
+	}
+	err2 = u.AppendFile("file1", []byte("appending to nonexistent things"))
+	if err2 == nil {
+		t.Error("append should fail because no file has been stored")
+		return
+	}
 	u.StoreFile("file1", v)
 
-	v2, err2 := u.LoadFile("file1")
-	if err2 != nil {
+	v2, err2 = u.LoadFile("file1")
+	if err2 != nil || len(v2) == 0 {
 		t.Error("Failed to upload and download", err2)
 		return
 	}
@@ -133,14 +143,22 @@ func TestStorage(t *testing.T) {
 		return
 	}
 
-	_ = u.AppendFile("file1", []byte("This is also a test"))
-	f2, _ := u.LoadFile("file1")
-	_ = f2
+	err = u.AppendFile("file1", []byte("This is also a test"))
+	if err != nil {
+		t.Error("problem during append", err)
+		return
+	}
+	f2, err := u.LoadFile("file1")
+	if err != nil {
+		t.Error("problem loading file", err)
+		return
+	}
 
 	if reflect.DeepEqual(f2, v2) {
 		t.Error("File did not append")
 		return
 	}
+
 	// Test empty file contents
 	v = []byte("")
 	u.StoreFile("file2", v)
@@ -158,6 +176,14 @@ func TestStorage(t *testing.T) {
 	f3, _ := u.LoadFile("file1")
 	if !reflect.DeepEqual(f2, f3) {
 		t.Error("File did not append")
+		return
+	}
+
+	v2 = []byte("totally new contents")
+	u.StoreFile("file1", v2)
+	overwrittenContents, err2 := u.LoadFile("file1")
+	if err2 != nil || !reflect.DeepEqual(v2, overwrittenContents) {
+		t.Error("Failed to overwrite file with new store", err2)
 		return
 	}
 }
@@ -250,12 +276,44 @@ func TestShare(t *testing.T) {
 		t.Error("Failed to receive the share message", err)
 		return
 	}
+	err = u2.ReceiveFile("file2", "alice", magic_string)
+	if err == nil {
+		t.Error("should error on receiving at a previously used filename", err)
+		return
+	}
 
 	v2, err = u2.LoadFile("file2")
 	if err != nil {
 		t.Error("Failed to download the file after sharing", err)
 		return
 	}
+	//TODO: test that bob can append and alice and bob can read back
+	u2.AppendFile("file2", []byte("test"))
+	v3, err := u2.LoadFile("file2")
+	v4, err := u.LoadFile("file1")
+	if reflect.DeepEqual(v2, v3) || reflect.DeepEqual(v2, v4) || !reflect.DeepEqual(v3, v4) {
+		t.Error("Shared user should be able to edit file")
+		return
+	}
+
+	// test receiving wrong access token from wrong sender
+	u3, _ := InitUser("malice", "fu")
+	maliciousFile := []byte("this is a virus")
+	u3.StoreFile("totally_legit", maliciousFile)
+	fake_token, _ := u3.ShareFile("totally_legit", "bob")
+	err = u2.ReceiveFile("file3", "alice", fake_token)
+	if err == nil {
+		t.Error("receive should have failed as the access token doesn't come from the presumed sender")
+		return
+	}
+
+	// Malice should not be able to recieve using token meant for Bob
+	err = u3.ReceiveFile("stolen_file", "alice", magic_string)
+	if err == nil {
+		t.Error("receive should fail as the token was for bob, not malice")
+		return
+	}
+
 	if !reflect.DeepEqual(v, v2) {
 		t.Error("Shared file is not the same", v, v2)
 		return
@@ -342,7 +400,7 @@ func TestMultiLevelSharing(t *testing.T) {
 		t.Error("Failed to download the file after sharing", err)
 		return
 	}
-	if !reflect.DeepEqual(v, v2) {
+	if !reflect.DeepEqual(v4, v2) {
 		t.Error("Shared file is not the same", v2, v4)
 		return
 	}
@@ -382,9 +440,9 @@ func TestRevokeFile(t *testing.T) {
 	}
 
 	// bob should still be able to append
-	err = u3.AppendFile("file2", []byte("This is also a file"))
+	err = u2.AppendFile("file2", []byte("This is also a file"))
 	if err != nil {
-		t.Error("Bob wasn't able to append after eve was revoke")
+		t.Error("Bob wasn't able to append after eve was revoked")
 		return
 	}
 }
@@ -482,10 +540,10 @@ func TestSeeChangesAfterRevoke(t *testing.T) {
 	// if alice changes file eve shouldn't be able to see changes
 	f := []byte("This is a new file")
 	u3.StoreFile("file3", v)
-	v3, _ = u3.LoadFile("file3")
 	u.StoreFile("file1", f)
 	v3, _ = u3.LoadFile("file3")
 	v1, _ := u.LoadFile("file1")
+	t.Log(string(v1))
 	if reflect.DeepEqual(v1, v3) {
 		t.Error("Eve shouldn't be able to see file changes after revoke")
 	}

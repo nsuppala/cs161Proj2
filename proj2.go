@@ -108,7 +108,6 @@ type FileAccess struct {
 // The structure for file's data
 // Sink node in the sharing tree
 type FilePrologue struct {
-	UUID            uuid.UUID
 	Owner           uuid.UUID             // Owner's UUID ion datastore server
 	ContentSegments []uuid.UUID           // Slice of UUIDs to FileContents parts in order
 	SharedWith      map[string]FileAccess // Map of usernames to the FileAccess issued to them (only tracks direct shares by owner)
@@ -116,7 +115,6 @@ type FilePrologue struct {
 
 // The structure for file
 type FileContents struct {
-	UUID uuid.UUID
 	Data []byte
 }
 
@@ -317,18 +315,13 @@ func (userdata *User) StoreFile(filename string, data []byte) {
 		}
 		prologue := FilePrologue{}
 		json.Unmarshal(decryptedPrologue, &prologue)
-		prologue.ContentSegments = []uuid.UUID{} // To overwrite, forget previous appends
+		contentsID := uuid.New()
+		prologue.ContentSegments = []uuid.UUID{contentsID} // To overwrite, forget previous appends
 		marshalPrologue, _ := json.Marshal(prologue)
 		SecureAndStore(access.EncryptionKey, access.MACKey, prologueID, marshalPrologue)
 
-		// Edit and Reupload FileContents
-		contentsID := uuid.New()
-		decryptedContents, err := VerifyAndDecrypt(access.EncryptionKey, access.MACKey, contentsID)
-		if err != nil {
-			return
-		}
+		// Upload new FileContents
 		contents := FileContents{}
-		json.Unmarshal(decryptedContents, &contents)
 		contents.Data = data
 		marshalContents, _ := json.Marshal(contents)
 		SecureAndStore(access.EncryptionKey, access.MACKey, contentsID, marshalContents)
@@ -340,14 +333,13 @@ func (userdata *User) StoreFile(filename string, data []byte) {
 
 		// Create FileContents and store on datastore with random ID
 		contentsID := uuid.New()
-		contents := FileContents{UUID: contentsID, Data: data}
+		contents := FileContents{data}
 		marshalContents, _ := json.Marshal(contents)
 		SecureAndStore(encKey, macKey, contentsID, marshalContents)
 
 		// Create FilePrologue and store on datastore with random ID
 		prologueID := uuid.New()
-		prologue := FilePrologue{UUID: prologueID,
-			Owner:           userdata.UUID,
+		prologue := FilePrologue{Owner: userdata.UUID,
 			ContentSegments: []uuid.UUID{contentsID},
 			SharedWith:      make(map[string]FileAccess)}
 		marshalPrologue, _ := json.Marshal(prologue)
@@ -369,7 +361,6 @@ func (userdata *User) StoreFile(filename string, data []byte) {
 // existing file, but only whatever additional information and
 // metadata you need.
 func (userdata *User) AppendFile(filename string, data []byte) (err error) {
-
 	// get FileAccess and FilePrologue for filename
 	access, prologue, err := getFileAccessAndFilePrologue(userdata, filename)
 	if err != nil {
@@ -378,14 +369,14 @@ func (userdata *User) AppendFile(filename string, data []byte) (err error) {
 
 	// Create FileContents and store on datastore with random ID
 	contentsID := uuid.New()
-	contents := FileContents{UUID: contentsID, Data: data}
+	contents := FileContents{data}
 	marshalContents, _ := json.Marshal(contents)
 	SecureAndStore(access.EncryptionKey, access.MACKey, contentsID, marshalContents)
 
 	// update FilePrologue contentsegments
 	prologue.ContentSegments = append(prologue.ContentSegments, contentsID)
 	marshalPrologue, _ := json.Marshal(prologue)
-	SecureAndStore(access.EncryptionKey, access.MACKey, prologue.UUID, marshalPrologue)
+	SecureAndStore(access.EncryptionKey, access.MACKey, access.UUID, marshalPrologue)
 
 	return nil
 }
@@ -556,7 +547,6 @@ func (userdata *User) RevokeFile(filename string, target_username string) (err e
 
 	// Remove target from SharedWith
 	_, ok = prologue.SharedWith[target_username]
-	//userlib.DebugMsg("Files: %v", ok)
 	if !ok {
 		return errors.New("target is not shared with")
 	}
@@ -576,7 +566,7 @@ func (userdata *User) RevokeFile(filename string, target_username string) (err e
 		SecureAndStore(encKey, macKey, ID, segment)
 	}
 	marshalPrologue, _ := json.Marshal(prologue)
-	SecureAndStore(encKey, macKey, prologue.UUID, marshalPrologue)
+	SecureAndStore(encKey, macKey, access.UUID, marshalPrologue)
 
 	// Update owner's FileAccess and override userdata on datastore
 	access.EncryptionKey = encKey
