@@ -37,22 +37,12 @@ func TestInit(t *testing.T) {
 	// You can set this to false!
 	userlib.SetDebugStatus(true)
 
-	u1, err := InitUser("alice", "fubar")
+	_, err := InitUser("alice", "fubar")
 	if err != nil {
 		// t.Error says the test fails
 		t.Error("Failed to initialize user", err)
 		return
 	}
-	/*
-		if (reflect.DeepEqual(u1.SignKey, userlib.DSSignKey{})) ||
-			(reflect.DeepEqual(u1.PKEDecKey, userlib.PKEDecKey{})) ||
-			(u1.Files == nil) || (u1.UUID == uuid.UUID{}) ||
-			(len(u1.EncryptionKey) == 0) ||
-			(len(u1.MACKey) == 0) {
-			t.Error("Failed to initialize all user fields", err)
-			return
-		}
-	*/
 	// t.Log() only produces output if you run with "go test -v"
 	//t.Log("Got user", u1)
 	// If you want to comment the line above,
@@ -106,6 +96,7 @@ func TestGetUser(t *testing.T) {
 		t.Error("Did not detect incorrect password")
 		return
 	}
+	// Error if user not initialized
 	_, err = GetUser("bob", "foobar")
 	if err == nil {
 		t.Error("Did not detect user does not exist")
@@ -412,6 +403,7 @@ func TestRevokeFile(t *testing.T) {
 	u, _ := InitUser("alice", "fubar")
 	u2, _ := InitUser("bob", "foobar")
 	u3, _ := InitUser("eve", "barfoo")
+	_, _ = InitUser("malice", "password")
 
 	v := []byte("This is a test")
 	u.StoreFile("file1", v)
@@ -445,6 +437,18 @@ func TestRevokeFile(t *testing.T) {
 	if err != nil {
 		t.Error("Bob wasn't able to append after eve was revoked")
 		return
+	}
+
+	// Cannot revoke a file that does not exist
+	err = u.RevokeFile("fileDNE", "eve")
+	if err == nil {
+		t.Error("Should not be able to revoke a file that does not exist")
+	}
+
+	// Cannot revoke from user that does not have access
+	err = u.RevokeFile("file1", "malice")
+	if err == nil {
+		t.Error("Did not detect target does not have access to file")
 	}
 }
 
@@ -623,4 +627,15 @@ func TestMultiLevelRevoke(t *testing.T) {
 		t.Error("Eve was able to append after revoke")
 		return
 	}
+
+	// Sharing after revoking should allow access again
+	v, _ = u.LoadFile("file1")
+	magic_string, _ = u.ShareFile("file1", "bob")
+	_ = u2.ReceiveFile("file2again", "alice", magic_string)
+	v2, err = u2.LoadFile("file2again")
+	if err != nil {
+		t.Error("Bob should have access again")
+	}
+	_ = v2
+
 }
